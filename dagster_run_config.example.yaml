@@ -1,0 +1,17 @@
+# Run config for the wrc_landing_and_transformation job.
+#
+#   dagster job execute -m wrc_pipeline.orchestration.definitions \
+#     -j wrc_landing_and_transformation -c dagster_run_config.example.yaml
+#
+# Configured once, on the ingestion op; the transformation op receives the same range
+# through the op dependency. Contains no secrets -- Mongo/MinIO credentials stay in the
+# environment (see .env.example).
+ops:
+  ingest_landing_zone:
+    config:
+      start_date: "2024-02-19"
+      end_date: "2024-02-20"
+      # optional: restrict to specific bodies, comma separated
+      bodies: "Labour Court"
+      # optional: daily | weekly | monthly | yearly  (default monthly)
+      partition_size: "monthly"

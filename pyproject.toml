@@ -10,6 +10,9 @@ dependencies = [
     "pymongo>=4.10",
     "boto3>=1.35",
     "python-dateutil>=2.9",
+    "beautifulsoup4>=4.12",
+    "lxml>=5.3",
+    "dagster>=1.9",
 ]
 
 [project.optional-dependencies]
@@ -18,10 +21,12 @@ dev = [
     "ruff>=0.8",
     "mongomock>=4.3",
     "moto[s3]>=5.0",
+    "dagster-webserver>=1.9",
 ]
 
 [project.scripts]
 wrc-ingest = "wrc_pipeline.ingestion.run:main"
+wrc-transform = "wrc_pipeline.transformation.run:main"
 
 [build-system]
 requires = ["setuptools>=75"]

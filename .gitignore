@@ -10,3 +10,11 @@ dist/
 .env.local
 data/
 *.log
+
+# Dagster local instance state (DAGSTER_HOME); root-anchored so wrc_pipeline/storage is safe
+dagster_home/
+.dagster/
+/storage/
+/history/
+/schedules/
+dagster_run_config.yaml

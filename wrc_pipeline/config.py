@@ -38,6 +38,7 @@ class Settings(BaseSettings):
     mongo_database: str = "wrc_landing"
     mongo_landing_collection: str = "landing_documents"
     mongo_state_collection: str = "landing_state"
+    mongo_transformed_collection: str = "transformed_documents"
 
     # --- S3 / MinIO ------------------------------------------------------------
     s3_endpoint_url: str | None = "http://localhost:9000"
@@ -47,6 +48,7 @@ class Settings(BaseSettings):
     s3_access_key_id: SecretStr | None = None
     s3_secret_access_key: SecretStr | None = None
     landing_bucket: str = "wrc-landing"
+    s3_transformed_bucket: str = "wrc-transformed"
     s3_create_bucket: bool = True
 
     # --- Scrapy tuning ---------------------------------------------------------

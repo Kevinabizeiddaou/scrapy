@@ -92,10 +92,14 @@ class StoredObject:
 
 
 class ObjectStore:
-    """Thin boto3 wrapper. Landing objects are written once and never overwritten."""
+    """Thin boto3 wrapper. Objects are written once and never overwritten.
 
-    def __init__(self, settings: Settings) -> None:
-        self.bucket = settings.landing_bucket
+    ``bucket`` defaults to the landing bucket; the transformation stage passes the
+    transformed bucket so both stages share one client implementation.
+    """
+
+    def __init__(self, settings: Settings, bucket: str | None = None) -> None:
+        self.bucket = bucket or settings.landing_bucket
         self._client = boto3.client(
             "s3",
             config=Config(
