@@ -1,0 +1,52 @@
+[project]
+name = "wrc-pipeline"
+version = "0.1.0"
+description = "Ingestion / landing zone for Irish Workplace Relations legal decisions"
+requires-python = ">=3.12"
+dependencies = [
+    "scrapy>=2.12",
+    "pydantic>=2.9",
+    "pydantic-settings>=2.6",
+    "pymongo>=4.10",
+    "boto3>=1.35",
+    "python-dateutil>=2.9",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3",
+    "ruff>=0.8",
+    "mongomock>=4.3",
+    "moto[s3]>=5.0",
+]
+
+[project.scripts]
+wrc-ingest = "wrc_pipeline.ingestion.run:main"
+
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["wrc_pipeline*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "C4", "RET", "PTH", "TID", "ARG"]
+ignore = ["B008"]
+
+[tool.ruff.lint.isort]
+# A stray ./scrapy/ directory in the workspace would otherwise make isort treat the
+# installed Scrapy package as first-party.
+known-third-party = ["scrapy", "parsel", "twisted"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["ARG001", "ARG002"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+filterwarnings = ["ignore::DeprecationWarning"]
