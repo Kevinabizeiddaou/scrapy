@@ -18,6 +18,13 @@ from wrc_pipeline.transformation import TRANSFORMATION_VERSION
 from wrc_pipeline.transformation.transformer import TransformationRun
 
 SOURCE = "workplacerelations.ie"
+# The ids the live search form exposes, as ingestion records them.
+BODY_IDS = {
+    "Employment Appeals Tribunal": "2",
+    "Equality Tribunal": "1",
+    "Labour Court": "3",
+    "Workplace Relations Commission": "15376",
+}
 LANDING_BUCKET = "wrc-landing-test"
 TRANSFORMED_BUCKET = "wrc-transformed-test"
 
@@ -86,6 +93,7 @@ def land(
     record = {
         "source": SOURCE,
         "body": body,
+        "body_id": BODY_IDS.get(body, "3"),
         "identifier": identifier,
         "title": identifier,
         "description": None,
@@ -179,7 +187,7 @@ def test_a_slash_identifier_keeps_its_filename_and_one_path_segment(zone) -> Non
     assert record["transformed_filename"] == "UD570%2F2009.pdf"
     assert record["identifier"] == "UD570/2009", "the original identifier is never mutated"
     assert record["transformed_storage_path"].endswith("/UD570%2F2009.pdf")
-    assert len(record["transformed_storage_path"].split("/")) == 5
+    assert len(record["transformed_storage_path"].split("/")) == 6
 
 
 # --- html -----------------------------------------------------------------------
@@ -272,7 +280,12 @@ def test_a_new_transformation_version_produces_a_new_transformed_version(zone) -
     versions = sorted(d["transformation_version"] for d in run.mongo.transformed.find({}))
     assert versions == [TRANSFORMATION_VERSION, 2]
     assert run.mongo.transformed.count_documents({}) == 2
-    assert len(keys(transformed_store)) == 1, "same landing bytes, same content-addressed key"
+    # Each version owns its object, so a future algorithm change cannot leave the new
+    # record pointing at the old algorithm's bytes.
+    assert len(keys(transformed_store)) == 2
+    paths = sorted(d["transformed_storage_path"] for d in run.mongo.transformed.find({}))
+    assert paths[0].endswith("/v1/ADJ-1.pdf")
+    assert paths[1].endswith("/v2/ADJ-1.pdf")
 
 
 def test_a_changed_landing_version_produces_a_new_transformed_version(zone) -> None:
@@ -482,3 +495,155 @@ def test_a_reversed_date_range_is_rejected(zone) -> None:
     _, _, _, make_run = zone
     with pytest.raises(ValueError, match="is after end_date"):
         make_run().execute(dt.date(2024, 2, 1), dt.date(2024, 1, 1))
+
+
+# --- calendar-date selection semantics ------------------------------------------
+
+
+def test_a_publication_time_of_day_is_still_inside_its_calendar_date(zone) -> None:
+    """The window is half-open on the upper bound, so <= end cannot drop an afternoon."""
+    landing_mongo, landing_store, _, make_run = zone
+    afternoon = land(landing_mongo, landing_store, identifier="PM-1", content=b"%PDF pm")
+    landing_mongo.landing.update_one(
+        {"_id": afternoon["_id"]},
+        {"$set": {"published_date": dt.datetime(2024, 1, 31, 16, 45, tzinfo=dt.UTC)}},
+    )
+
+    run = make_run()
+    selected = list(run.mongo.select_landing_versions(dt.date(2024, 1, 1), dt.date(2024, 1, 31)))
+    assert [d["identifier"] for d in selected] == ["PM-1"]
+
+    same_day = list(run.mongo.select_landing_versions(dt.date(2024, 1, 31), dt.date(2024, 1, 31)))
+    assert [d["identifier"] for d in same_day] == ["PM-1"]
+
+
+def test_the_day_after_the_end_date_is_excluded(zone) -> None:
+    landing_mongo, landing_store, _, make_run = zone
+    inside = land(landing_mongo, landing_store, identifier="IN-1", published=dt.date(2024, 1, 31))
+    land(landing_mongo, landing_store, identifier="OUT-1", published=dt.date(2024, 2, 1))
+    landing_mongo.landing.update_one(
+        {"_id": inside["_id"]},
+        {"$set": {"published_date": dt.datetime(2024, 1, 31, 23, 59, 59, tzinfo=dt.UTC)}},
+    )
+
+    run = make_run()
+    selected = list(run.mongo.select_landing_versions(dt.date(2024, 1, 1), dt.date(2024, 1, 31)))
+    assert [d["identifier"] for d in selected] == ["IN-1"]
+
+
+def test_a_leap_day_is_selectable(zone) -> None:
+    landing_mongo, landing_store, _, make_run = zone
+    land(landing_mongo, landing_store, identifier="LEAP-1", published=dt.date(2024, 2, 29))
+
+    run = make_run()
+    selected = list(run.mongo.select_landing_versions(dt.date(2024, 2, 29), dt.date(2024, 2, 29)))
+    assert [d["identifier"] for d in selected] == ["LEAP-1"]
+
+
+# --- object write precedes metadata, and the pair converges ---------------------
+
+
+def test_an_object_write_failure_prevents_any_metadata_insert(zone) -> None:
+    landing_mongo, landing_store, transformed_store, make_run = zone
+    landing = land(landing_mongo, landing_store, identifier="ADJ-1")
+    run = make_run()
+
+    with patch.object(run.transformed_store, "put_if_absent", side_effect=OSError("MinIO down")):
+        assert run.transform_one(landing) == "failed"
+
+    assert run.mongo.transformed.count_documents({}) == 0
+    assert keys(transformed_store) == []
+    assert run.tally.failed == 1
+
+
+def test_a_metadata_failure_after_the_object_write_converges_on_the_next_run(zone) -> None:
+    """The object is already there; the next run must complete the pair, not duplicate it."""
+    landing_mongo, landing_store, transformed_store, make_run = zone
+    landing = land(landing_mongo, landing_store, identifier="ADJ-1")
+
+    first = make_run("t-run-1")
+    with patch.object(first.mongo, "insert_transformed", side_effect=RuntimeError("mongo down")):
+        assert first.transform_one(landing) == "failed"
+    assert len(keys(transformed_store)) == 1, "the object landed before metadata failed"
+    assert first.mongo.transformed.count_documents({}) == 0
+
+    second = make_run("t-run-2")
+    assert second.transform_one(landing) == "transformed"
+
+    record = second.mongo.transformed.find_one({})
+    assert second.mongo.transformed.count_documents({}) == 1
+    assert len(keys(transformed_store)) == 1, "the existing object is reused, not duplicated"
+    stored = transformed_store.get(record["transformed_storage_path"])
+    assert record["transformed_file_hash"] == sha256_hex(stored)
+
+
+@pytest.mark.parametrize(
+    "error",
+    [OSError("MinIO unreachable"), RuntimeError("unexpected"), KeyError("schema drift")],
+)
+def test_any_unexpected_error_is_counted_not_propagated(zone, error: Exception) -> None:
+    """A single bad document must never abandon the rest of the selection."""
+    landing_mongo, landing_store, _, make_run = zone
+    good = land(landing_mongo, landing_store, identifier="OK-1", content=b"%PDF ok")
+    bad = land(landing_mongo, landing_store, identifier="BAD-1", content=b"%PDF bad")
+    run = make_run()
+
+    real_get = run.landing_store.get
+
+    def selective(key: str) -> bytes:
+        if "BAD-1" in key:
+            raise error
+        return real_get(key)
+
+    with patch.object(run.landing_store, "get", side_effect=selective):
+        tally = run.process([bad, good])
+
+    assert (tally.selected, tally.transformed, tally.failed) == (2, 1, 1)
+    assert tally.balanced
+
+
+def test_a_keyboard_interrupt_still_aborts_the_run(zone) -> None:
+    """Ctrl-C must not be swallowed as a per-document failure."""
+    landing_mongo, landing_store, _, make_run = zone
+    landing = land(landing_mongo, landing_store, identifier="ADJ-1")
+    run = make_run()
+
+    with (
+        patch.object(run.landing_store, "get", side_effect=KeyboardInterrupt),
+        pytest.raises(KeyboardInterrupt),
+    ):
+        run.transform_one(landing)
+
+
+# --- the body filter must mean the same thing to both stages --------------------
+
+
+def test_a_body_id_or_any_casing_resolves_to_the_stored_body_name(zone) -> None:
+    """Ingestion accepts an id or loose casing; transformation must not silently miss."""
+    landing_mongo, landing_store, _, make_run = zone
+    land(landing_mongo, landing_store, identifier="LC-1", body="Labour Court")
+    land(landing_mongo, landing_store, identifier="EAT-1", body="Employment Appeals Tribunal")
+
+    run = make_run()
+    for token in ("Labour Court", "labour court", "LABOUR COURT", " Labour Court ", "3"):
+        selected = list(
+            run.mongo.select_landing_versions(dt.date(2024, 1, 1), dt.date(2024, 1, 31), [token])
+        )
+        assert [d["identifier"] for d in selected] == ["LC-1"], token
+
+
+def test_an_unknown_body_filter_fails_loudly_instead_of_selecting_nothing(zone) -> None:
+    """A filter typo must not look like a successful run over zero documents."""
+    landing_mongo, landing_store, _, make_run = zone
+    land(landing_mongo, landing_store, identifier="LC-1", body="Labour Court")
+    run = make_run()
+
+    with pytest.raises(ValueError, match="no landing records for body filter"):
+        run.execute(dt.date(2024, 1, 1), dt.date(2024, 1, 31), ["Supreme Court"])
+
+
+def test_duplicate_body_tokens_are_collapsed(zone) -> None:
+    landing_mongo, landing_store, _, make_run = zone
+    land(landing_mongo, landing_store, identifier="LC-1", body="Labour Court")
+    run = make_run()
+    assert run.mongo.resolve_bodies(["Labour Court", "labour court", "3"]) == ["Labour Court"]

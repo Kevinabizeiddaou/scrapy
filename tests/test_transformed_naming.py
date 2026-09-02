@@ -13,6 +13,7 @@ from wrc_pipeline.transformation.naming import (
 )
 
 HASH = "a" * 64
+VERSION = 1
 
 
 @pytest.mark.parametrize(
@@ -116,9 +117,10 @@ def test_object_key_shape_ends_with_the_identifier_filename() -> None:
         body="Labour Court",
         identifier="LCR22912",
         landing_version_hash=HASH,
+        transformation_version=VERSION,
         document_type="html",
     )
-    assert key == f"transformed/labour-court/lcr22912/{HASH}/LCR22912.html"
+    assert key == f"transformed/labour-court/lcr22912/{HASH}/v1/LCR22912.html"
 
 
 def test_object_key_is_safe_and_single_segment_for_a_slash_identifier() -> None:
@@ -126,10 +128,11 @@ def test_object_key_is_safe_and_single_segment_for_a_slash_identifier() -> None:
         body="Employment Appeals Tribunal",
         identifier="UD570/2009",
         landing_version_hash=HASH,
+        transformation_version=VERSION,
         document_type="pdf",
     )
-    assert key == f"transformed/employment-appeals-tribunal/ud570-2009/{HASH}/UD570%2F2009.pdf"
-    assert len(key.split("/")) == 5
+    assert key == (f"transformed/employment-appeals-tribunal/ud570-2009/{HASH}/v1/UD570%2F2009.pdf")
+    assert len(key.split("/")) == 6
 
 
 def test_object_key_is_deterministic() -> None:
@@ -137,6 +140,7 @@ def test_object_key_is_deterministic() -> None:
         "body": "Labour Court",
         "identifier": "LCR22912",
         "landing_version_hash": HASH,
+        "transformation_version": VERSION,
         "document_type": "html",
     }
     assert transformed_object_key(**args) == transformed_object_key(**args)
@@ -144,11 +148,25 @@ def test_object_key_is_deterministic() -> None:
 
 def test_a_new_landing_version_gets_its_own_key() -> None:
     args = {"body": "Labour Court", "identifier": "LCR22912", "document_type": "html"}
-    first = transformed_object_key(landing_version_hash=HASH, **args)
-    second = transformed_object_key(landing_version_hash="b" * 64, **args)
+    first = transformed_object_key(landing_version_hash=HASH, transformation_version=1, **args)
+    second = transformed_object_key(landing_version_hash="b" * 64, transformation_version=1, **args)
     assert first != second
-    assert first.rsplit("/", 2)[0] == second.rsplit("/", 2)[0]
     assert first.rsplit("/", 1)[-1] == second.rsplit("/", 1)[-1] == "LCR22912.html"
+
+
+def test_a_new_transformation_version_gets_its_own_key() -> None:
+    """Otherwise a bumped version would reuse the previous algorithm's stored bytes."""
+    args = {
+        "body": "Labour Court",
+        "identifier": "LCR22912",
+        "landing_version_hash": HASH,
+        "document_type": "html",
+    }
+    first = transformed_object_key(transformation_version=1, **args)
+    second = transformed_object_key(transformation_version=2, **args)
+    assert first != second
+    assert first.endswith("/v1/LCR22912.html")
+    assert second.endswith("/v2/LCR22912.html")
 
 
 def test_object_key_is_safe_for_hostile_identifiers() -> None:
@@ -156,8 +174,9 @@ def test_object_key_is_safe_for_hostile_identifiers() -> None:
         body="../../Labour Court",
         identifier="../../../etc/passwd",
         landing_version_hash=HASH,
+        transformation_version=VERSION,
         document_type="pdf",
     )
     assert key.startswith("transformed/")
-    assert len(key.split("/")) == 5
+    assert len(key.split("/")) == 6
     assert "/etc/passwd" not in key

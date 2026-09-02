@@ -10,6 +10,14 @@ from wrc_pipeline.transformation.html_cleaner import ContentNotFoundError, extra
 
 DETAIL_URL = "https://www.workplacerelations.ie/en/cases/2024/february/lcr22912.html"
 
+# Enough decision text to clear the minimum-content floor, so synthetic pages exercise the
+# behaviour under test rather than the degenerate-output guard.
+BODY = "<p>" + "The Court has considered the submissions of both parties. " * 6 + "</p>"
+
+
+def page(markup: str) -> str:
+    return f'<div class="content">{BODY}{markup}</div>'
+
 
 def clean(fixture: str = "detail_inline_html.html", identifier: str = "LCR22912") -> str:
     return extract_decision(load_fixture(fixture), base_url=DETAIL_URL, title=identifier).decode(
@@ -119,10 +127,11 @@ def test_dead_word_import_classes_and_presentational_attributes_are_dropped() ->
 
 def test_inline_layout_styles_are_dropped() -> None:
     """Only layout properties appear inline in the corpus; none carry legal meaning."""
-    page = (
-        '<div class="content"><p style="padding-left:60px;background-color:#ff0">indented</p></div>'
-    )
-    output = extract_decision(page, base_url=DETAIL_URL, title="X").decode("utf-8")
+    output = extract_decision(
+        page('<p style="padding-left:60px;background-color:#ff0">indented</p>'),
+        base_url=DETAIL_URL,
+        title="X",
+    ).decode("utf-8")
     assert "padding-left" not in output
     assert "background-color" not in output
     assert "indented" in output
@@ -136,12 +145,11 @@ def test_spacer_images_are_dropped() -> None:
 
 def test_a_real_document_image_is_kept() -> None:
     """The Labour Court signature seal is part of the decision, unlike the spacer gif."""
-    page = (
-        '<div class="content"><p>text</p>'
+    markup = (
         '<img src="/images_upload/wrc/en/labour_court_import/signature_logo.png" alt="seal"/>'
-        '<img src="/icons/ecblank.gif" alt=""/></div>'
+        '<img src="/icons/ecblank.gif" alt=""/>'
     )
-    soup = BeautifulSoup(extract_decision(page, base_url=DETAIL_URL, title="X"), "lxml")
+    soup = BeautifulSoup(extract_decision(page(markup), base_url=DETAIL_URL, title="X"), "lxml")
     images = soup.find_all("img")
     assert len(images) == 1
     assert images[0]["src"].endswith("/signature_logo.png")
@@ -203,17 +211,25 @@ def test_a_page_without_the_container_fails_instead_of_storing_the_whole_page() 
 
 
 @pytest.mark.parametrize(
-    "empty",
+    "degenerate",
     [
         '<div class="content"></div>',
         '<div class="content">   </div>',
         '<div class="content"><script>var x=1;</script></div>',
         '<div class="content"><p> </p><span>  </span></div>',
+        '<div class="content"><p>DECISION NO. LCR1</p></div>',  # truncated mid-document
     ],
 )
-def test_an_empty_container_fails(empty: str) -> None:
-    with pytest.raises(ContentNotFoundError, match="empty after cleaning"):
-        extract_decision(f"<html><body>{empty}</body></html>", base_url=DETAIL_URL, title="X")
+def test_a_container_with_no_usable_content_fails(degenerate: str) -> None:
+    """Refusing beats storing a stub as if it were the decision."""
+    with pytest.raises(ContentNotFoundError, match="characters of text"):
+        extract_decision(f"<html><body>{degenerate}</body></html>", base_url=DETAIL_URL, title="X")
+
+
+def test_the_shortest_real_decision_in_the_corpus_is_well_clear_of_the_floor() -> None:
+    """Guards the floor against being raised to where a genuine decision would fail."""
+    text = BeautifulSoup(clean(), "lxml").get_text(" ", strip=True)
+    assert len(text) > 2000
 
 
 def test_malformed_html_without_a_container_fails_cleanly() -> None:
@@ -226,20 +242,17 @@ def test_malformed_html_without_a_container_fails_cleanly() -> None:
 
 def test_unknown_tags_are_unwrapped_rather_than_dropped() -> None:
     """A Word artefact tag (o3a_p appears once in the corpus) must not eat its text."""
-    page = '<div class="content"><o3a_p>kept text</o3a_p><p>and this</p></div>'
-    output = extract_decision(page, base_url=DETAIL_URL, title="X").decode("utf-8")
+    output = extract_decision(
+        page("<o3a_p>kept text</o3a_p><p>and this</p>"), base_url=DETAIL_URL, title="X"
+    ).decode("utf-8")
     assert "kept text" in output
     assert "o3a_p" not in output
     assert "and this" in output
 
 
 def test_structural_table_attributes_are_kept() -> None:
-    page = (
-        '<div class="content"><table><tr>'
-        '<td colspan="2" rowspan="3" width="80" class="c3">cell</td>'
-        "</tr></table></div>"
-    )
-    soup = BeautifulSoup(extract_decision(page, base_url=DETAIL_URL, title="X"), "lxml")
+    markup = '<table><tr><td colspan="2" rowspan="3" width="80" class="c3">cell</td></tr></table>'
+    soup = BeautifulSoup(extract_decision(page(markup), base_url=DETAIL_URL, title="X"), "lxml")
     cell = soup.find("td")
     assert cell["colspan"] == "2"
     assert cell["rowspan"] == "3"
@@ -248,6 +261,40 @@ def test_structural_table_attributes_are_kept() -> None:
 
 
 def test_ordered_list_numbering_is_kept() -> None:
-    page = '<div class="content"><ol start="4"><li>four</li></ol></div>'
-    soup = BeautifulSoup(extract_decision(page, base_url=DETAIL_URL, title="X"), "lxml")
+    soup = BeautifulSoup(
+        extract_decision(page('<ol start="4"><li>four</li></ol>'), base_url=DETAIL_URL, title="X"),
+        "lxml",
+    )
     assert soup.find("ol")["start"] == "4"
+
+
+# --- unsafe URLs must not survive into a stored artefact -----------------------
+
+
+@pytest.mark.parametrize(
+    "unsafe",
+    [
+        '<a href="javascript:alert(1)">click</a>',
+        '<a href="JavaScript:alert(1)">click</a>',
+        '<a href="vbscript:msgbox">click</a>',
+        '<img src="data:text/html;base64,PHNjcmlwdD4=" alt="x"/>',
+    ],
+)
+def test_unsafe_url_schemes_are_dropped_but_their_text_is_kept(unsafe: str) -> None:
+    output = extract_decision(page(unsafe), base_url=DETAIL_URL, title="X").decode("utf-8")
+    for scheme in ("javascript:", "vbscript:", "data:text"):
+        assert scheme not in output.lower(), scheme
+    assert "considered the submissions" in output
+
+
+@pytest.mark.parametrize(
+    ("markup", "expected"),
+    [
+        ('<a href="/en/x.pdf">a</a>', "https://www.workplacerelations.ie/en/x.pdf"),
+        ('<a href="https://example.ie/a.pdf">a</a>', "https://example.ie/a.pdf"),
+        ('<a href="mailto:info@wrc.ie">a</a>', "mailto:info@wrc.ie"),
+    ],
+)
+def test_safe_url_schemes_survive(markup: str, expected: str) -> None:
+    soup = BeautifulSoup(extract_decision(page(markup), base_url=DETAIL_URL, title="X"), "lxml")
+    assert soup.find("a")["href"] == expected

@@ -136,15 +136,12 @@ class LandingZonePipeline:
         if state and state.get("latest_hash") == version_hash:
             # Same content as the version we already landed: refresh only the validators
             # so the next run can be answered with a 304.
-            self._mongo.upsert_state(
-                source=item.source,
-                body=item.body,
-                identifier=item.identifier,
-                latest_hash=version_hash,
-                latest_metadata_id=state.get("latest_metadata_id"),
+            self._point_state_at(
+                item,
+                version_hash=version_hash,
+                metadata_id=state.get("latest_metadata_id"),
                 etag=item.etag or state.get("etag"),
                 last_modified=item.last_modified or state.get("last_modified"),
-                run_id=item.run_id,
             )
             return {
                 "persisted": False,
@@ -178,15 +175,10 @@ class LandingZonePipeline:
                 },
                 {"_id": 1},
             )
-            self._mongo.upsert_state(
-                source=item.source,
-                body=item.body,
-                identifier=item.identifier,
-                latest_hash=version_hash,
-                latest_metadata_id=existing["_id"] if existing else None,
-                etag=item.etag,
-                last_modified=item.last_modified,
-                run_id=item.run_id,
+            self._point_state_at(
+                item,
+                version_hash=version_hash,
+                metadata_id=existing["_id"] if existing else None,
             )
             return {
                 "persisted": False,
@@ -195,17 +187,34 @@ class LandingZonePipeline:
                 "reason": "version_already_landed",
             }
 
+        self._point_state_at(item, version_hash=version_hash, metadata_id=metadata_id)
+        return {"persisted": True, "uploaded": stored.uploaded, "stored": stored, "reason": None}
+
+    def _point_state_at(
+        self,
+        item: LandingDocument,
+        *,
+        version_hash: str,
+        metadata_id: Any,
+        etag: str | None = None,
+        last_modified: str | None = None,
+    ) -> None:
+        """Make operational state describe the version now current for this identifier.
+
+        Validators default to the ones this fetch returned; the unchanged path passes the
+        previously stored ones through when this fetch produced none.
+        """
+        assert self._mongo is not None
         self._mongo.upsert_state(
             source=item.source,
             body=item.body,
             identifier=item.identifier,
             latest_hash=version_hash,
             latest_metadata_id=metadata_id,
-            etag=item.etag,
-            last_modified=item.last_modified,
+            etag=etag if etag is not None else item.etag,
+            last_modified=last_modified if last_modified is not None else item.last_modified,
             run_id=item.run_id,
         )
-        return {"persisted": True, "uploaded": stored.uploaded, "stored": stored, "reason": None}
 
 
 __all__ = ["LandingZonePipeline"]

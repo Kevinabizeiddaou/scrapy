@@ -68,14 +68,21 @@ def transformed_object_key(
     body: str,
     identifier: str,
     landing_version_hash: str,
+    transformation_version: int,
     document_type: str,
     prefix: str = "transformed",
 ) -> str:
-    """``transformed/{body}/{identifier}/{landing_version_hash}/{identifier.ext}``.
+    """``transformed/{body}/{identifier}/{landing_version_hash}/v{n}/{identifier.ext}``.
 
-    The directories are slugified and carry the landing version hash, which keeps keys
-    collision-safe and stops one transformed version from overwriting another, while the
-    final segment stays the ``identifier.ext`` filename the assessment asks for.
+    The directories are slugified and carry both halves of the transformed identity -- the
+    landing version hash and the transformation version -- so no transformed version can
+    overwrite or be mistaken for another, while the final segment stays the
+    ``identifier.ext`` filename the assessment asks for.
+
+    The transformation version has to be in the key: without it, bumping
+    ``TRANSFORMATION_VERSION`` would produce a new metadata record whose deterministic key
+    already exists, the upload would be skipped, and the new record would point at the
+    previous algorithm's bytes.
     """
     return "/".join(
         (
@@ -83,6 +90,7 @@ def transformed_object_key(
             slugify(body),
             slugify(identifier),
             landing_version_hash,
+            f"v{transformation_version}",
             transformed_filename(identifier, document_type),
         )
     )

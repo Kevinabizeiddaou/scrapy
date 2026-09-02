@@ -480,3 +480,68 @@ def test_cached_and_uncached_bytes_are_both_preserved_verbatim_when_content_chan
     assert store.get(first["storage_key"]) == HTML_V1_FROM_CACHE
     assert b"cached or not being index.aspx page" in store.get(first["storage_key"])
     assert mongo.landing.count_documents({}) == 2
+
+
+# --- the normalisation must not be able to hide a legal edit --------------------
+
+LEGAL = b"<html><body><p>The Court awards the complainant EUR 17,000.</p></body></html>"
+
+
+@pytest.mark.parametrize(
+    ("label", "other"),
+    [
+        ("render time differs", LEGAL + b"\n<!-- Elapsed time: 9.9 -->"),
+        (
+            "cache marker appears",
+            LEGAL + b"\n<!-- cached or not being index.aspx page --><!-- Elapsed time: 0 -->",
+        ),
+    ],
+)
+def test_only_the_two_known_server_markers_are_ignored(label: str, other: bytes) -> None:
+    baseline = html_item(LEGAL + b"\n<!-- Elapsed time: 0.1 -->")
+    assert baseline.version_hash == html_item(other).version_hash, label
+
+
+@pytest.mark.parametrize(
+    ("label", "edited"),
+    [
+        ("award amount changed", LEGAL.replace(b"17,000", b"18,000")),
+        ("one letter changed", LEGAL.replace(b"awards", b"awardz")),
+        ("a word removed", LEGAL.replace(b"the complainant ", b"")),
+        ("whitespace changed", LEGAL.replace(b"<p>The", b"<p>  The")),
+        ("an unrelated comment differs", LEGAL + b"<!-- reviewed by AB -->"),
+        ("a tag changed", LEGAL.replace(b"<p>", b"<h2>").replace(b"</p>", b"</h2>")),
+    ],
+)
+def test_any_real_content_change_changes_the_version_identity(label: str, edited: bytes) -> None:
+    baseline = html_item(LEGAL + b"\n<!-- Elapsed time: 0.1 -->")
+    assert (
+        baseline.version_hash != html_item(edited + b"\n<!-- Elapsed time: 0.1 -->").version_hash
+    ), label
+
+
+def test_an_edited_decision_lands_a_new_version_rather_than_reporting_unchanged(landing) -> None:
+    pipeline, mongo, store = landing
+    original = LEGAL + b"\n<!-- Elapsed time: 0.1 -->"
+    amended = LEGAL.replace(b"17,000", b"18,000") + b"\n<!-- Elapsed time: 0.4 -->"
+
+    pipeline.process_item(html_item(original), SpiderStub("run-1"))
+    spider = SpiderStub("run-2")
+    pipeline.process_item(html_item(amended, run_id="run-2"), spider)
+
+    assert mongo.landing.count_documents({}) == 2, "an edited decision is a new version"
+    assert len(object_keys(store)) == 2
+    assert spider.counters.successful == 1
+
+
+def test_the_stored_bytes_are_never_normalised(landing) -> None:
+    """Normalisation exists only to compute the identity; storage stays byte-exact."""
+    pipeline, mongo, store = landing
+    raw = LEGAL + b"\n<!-- cached or not being index.aspx page --><!-- Elapsed time: 0.25 -->"
+    pipeline.process_item(html_item(raw), SpiderStub("run-1"))
+
+    record = mongo.landing.find_one({})
+    stored = store.get(record["storage_key"])
+    assert stored == raw
+    assert record["file_hash"] == sha256_hex(raw)
+    assert record["file_hash"] != record["version_hash"]

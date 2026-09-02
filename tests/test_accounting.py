@@ -247,3 +247,37 @@ def test_run_totals_balance_even_when_the_site_undercounted() -> None:
     assert totals["records_found"] == 2
     assert totals["records_successful"] == 2
     assert totals["accounting_balanced"] is True
+
+
+def test_rows_beyond_the_sites_own_count_still_have_to_resolve(accounting) -> None:
+    """The site rendered 8 rows while claiming 5; the 3 unresolved must not vanish."""
+    key = start(accounting)
+    accounting.record_result_count(key, found=5, pages_expected=1)
+    accounting.record_page_parsed(key)
+    for n in range(8):
+        accounting.register_row(key, f"/{n}")
+    for _ in range(5):
+        accounting.record_successful(key)
+
+    accounting._close(accounting.partitions[key], incomplete=True)
+
+    counters = accounting.partitions[key]
+    assert counters.rows_seen == 8
+    assert counters.failed == 3, "the rows that never resolved are booked as failures"
+    assert counters.resolved == 8
+    assert counters.found == 8
+    assert counters.site_reported_total == 5
+    assert counters.balanced
+
+
+def test_a_partition_abandoned_mid_page_books_every_registered_row(accounting) -> None:
+    key = start(accounting)
+    accounting.record_result_count(key, found=10, pages_expected=2)
+    accounting.record_page_parsed(key)
+    for n in range(10):
+        accounting.register_row(key, f"/{n}")
+    accounting.record_successful(key)
+
+    totals = accounting.finalise()
+    assert totals["records_failed"] == 9
+    assert totals["accounting_balanced"] is True

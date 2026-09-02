@@ -530,3 +530,71 @@ def test_a_state_touch_failure_on_304_still_counts_the_record(caplog) -> None:
     counters = spider.accounting.partitions[CTX.key]
     assert (counters.unchanged, counters.failed) == (1, 0)
     assert counters.completed
+
+
+# --- an unreadable search page must fail its partition, not empty it -----------
+
+
+def test_a_non_text_search_response_fails_the_partition(caplog) -> None:
+    """A WAF answering with application/octet-stream makes Response.text raise.
+
+    Scrapy sends callback errors to spider_error rather than the errback and keeps going,
+    so without a guard the partition would close as an empty, balanced, successful one
+    while actually holding decisions.
+    """
+    spider = make_spider(caplog=caplog)
+    url = "https://x/search?pageNumber=1"
+    response = Response(
+        url=url,
+        status=200,
+        body=b"\x00\x01\x02binary",
+        headers={"Content-Type": "application/octet-stream"},
+        request=Request(url, meta={"wrc": CTX}),
+    )
+
+    with caplog.at_level(logging.ERROR):
+        assert list(spider.parse_search(response)) == []
+
+    record = next(r for r in caplog.records if r.msg == "partition_failed")
+    assert record.reason == "search_page_unreadable"
+    assert record.error_type == "AttributeError"
+    assert record.body == "Labour Court"
+    assert record.partition_date == "2024-01-01"
+
+    counters = spider.accounting.partitions[CTX.key]
+    assert counters.status == "failed"
+    assert counters.error.startswith("search_page_unreadable")
+    assert spider.accounting.finalise()["partitions_failed"] == 1
+
+
+def test_an_unreadable_later_page_does_not_lose_its_partition() -> None:
+    spider = make_spider()
+    spider.accounting.record_result_count(CTX.key, 20, 2)
+    spider.accounting.record_page_parsed(CTX.key)
+
+    ctx = Context(CTX.body, CTX.body_id, PARTITION, page=2)
+    url = "https://x/search?pageNumber=2"
+    response = Response(
+        url=url,
+        status=200,
+        body=b"\x00binary",
+        headers={"Content-Type": "application/octet-stream"},
+        request=Request(url, meta={"wrc": ctx}),
+    )
+
+    assert list(spider.parse_search(response)) == []
+    counters = spider.accounting.partitions[CTX.key]
+    assert counters.completed, "both pages accounted for, so the partition closes"
+    assert counters.failed == 20, "the rows that page never delivered are failures"
+    assert counters.balanced
+
+
+def test_a_partition_never_counted_is_reported_failed_not_empty() -> None:
+    """Covers requests still queued when the engine shuts down."""
+    spider = make_spider()
+
+    totals = spider.accounting.finalise()
+    counters = spider.accounting.partitions[CTX.key]
+    assert counters.status == "failed"
+    assert counters.error == "result_count_never_established"
+    assert totals["partitions_failed"] == 1

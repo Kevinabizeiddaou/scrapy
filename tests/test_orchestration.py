@@ -9,6 +9,8 @@ from __future__ import annotations
 from typing import Any
 from unittest.mock import patch
 
+import pytest
+
 from wrc_pipeline.orchestration import definitions as orch
 
 JOB = orch.wrc_landing_and_transformation
@@ -57,7 +59,10 @@ def run_job(
 ) -> tuple[Any, list[dict[str, Any]]]:
     """Execute the job with both child processes replaced by canned results."""
     outcomes = {
-        "run_completed": (ingest_returncode, ingest_summary or INGESTION_OK),
+        "run_completed": (
+            ingest_returncode,
+            INGESTION_OK if ingest_summary is None else ingest_summary,
+        ),
         "transformation_run_completed": (
             transform_returncode,
             TRANSFORMATION_OK if transform_summary is None else transform_summary,
@@ -272,3 +277,72 @@ def test_the_orchestration_module_never_runs_scrapy_in_process() -> None:
     }
     assert "CrawlerProcess" not in called
     assert "WrcDecisionsSpider" not in called
+
+
+# --- child summary parsing ------------------------------------------------------
+
+
+def test_the_summary_event_is_read_from_the_childs_json_stream() -> None:
+    line = (
+        '{"timestamp": "2026-01-01T00:00:00+00:00", "level": "INFO", "event": '
+        '"run_completed", "records_found": 9}'
+    )
+    assert orch._summary_event(line, "run_completed")["records_found"] == 9
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "",
+        "plain scrapy log line",
+        '{"event": "run_completed"',  # truncated JSON
+        '{"event": "partition_completed", "records_found": 9}',  # a different event
+        '{"event": "transformation_run_completed"}',  # the other stage's summary
+        "not json at all: run_completed",
+        '["run_completed"]',  # valid JSON, wrong shape
+    ],
+)
+def test_a_line_that_is_not_the_wanted_summary_is_ignored(line: str) -> None:
+    assert orch._summary_event(line, "run_completed") is None
+
+
+def test_the_transformation_summary_is_matched_separately() -> None:
+    """'transformation_run_completed' contains 'run_completed' as a substring."""
+    line = '{"event": "transformation_run_completed", "records_selected": 4}'
+    assert orch._summary_event(line, "run_completed") is None
+    assert orch._summary_event(line, "transformation_run_completed")["records_selected"] == 4
+
+
+def test_a_missing_child_summary_still_succeeds_but_reports_no_counts() -> None:
+    """A child can exit 0 without its summary line being parsed; that is not a failure."""
+    result, _ = run_job(ingest_summary={}, transform_summary={})
+
+    assert result.success
+    ingested = result.output_for_node("ingest_landing_zone")
+    assert ingested["ingestion"] == {}
+    assert ingested["start_date"] == "2024-01-01", "the date range is still propagated"
+    assert result.output_for_node("transform_landing_zone")["transformation"] == {}
+
+
+def test_metadata_omits_counts_that_the_child_never_reported() -> None:
+    metadata = orch._ingestion_metadata("run-1", {})
+    assert metadata == {"ingestion_run_id": "run-1"}
+
+    partial = orch._ingestion_metadata("run-1", {"records_found": 3, "reason": "finished"})
+    assert partial["records_found"].value == 3
+    assert partial["finish_reason"] == "finished"
+
+
+def test_metadata_ignores_non_integer_counts() -> None:
+    """A malformed child line must not crash metadata assembly."""
+    metadata = orch._ingestion_metadata("run-1", {"records_found": "many", "partitions": None})
+    assert "records_found" not in metadata
+    assert "partitions" not in metadata
+
+
+def test_a_signal_killed_child_is_treated_as_failure() -> None:
+    """subprocess reports a negative returncode when the child dies by signal."""
+    result, spawned = run_job(ingest_returncode=-9, ingest_summary={})
+
+    assert not result.success
+    assert not was_spawned(spawned, TRANSFORMATION_MODULE)

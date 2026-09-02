@@ -184,7 +184,18 @@ class RunAccounting:
 
     def _close(self, counters: PartitionCounters, *, incomplete: bool = False) -> None:
         """Reconcile a partition's tally, then emit ``partition_completed``."""
-        shortfall = counters.found - counters.resolved
+        if not counters.count_known:
+            # We never learned how many records the site had for this partition, so an
+            # empty tally proves nothing. Reporting "0 found, balanced, ok" here would
+            # record a populated date range as genuinely empty.
+            counters.status = "failed"
+            counters.error = counters.error or "result_count_never_established"
+
+        # Reconcile against whichever is larger: the total the site reported, or the rows
+        # this run actually registered. Using ``found`` alone would let rows the site
+        # rendered beyond its own count go unresolved yet still look balanced.
+        expected = max(counters.found, counters.rows_seen)
+        shortfall = expected - counters.resolved
         if shortfall > 0:
             counters.failed += shortfall
             self.events.error(
@@ -193,15 +204,16 @@ class RunAccounting:
                 records_missing=shortfall,
                 **counters.summary(),
             )
-        elif shortfall < 0:
+        if counters.found < counters.resolved:
             # The site rendered more rows than it counted. Raise records_found to what was
             # actually accounted for -- reporting an unbalanced tally would be worse than
             # admitting the site's own total was low, which site_reported_total preserves.
+            extra = counters.resolved - counters.found
             counters.found = counters.resolved
             self.events.warning(
                 "partition_records_overcount",
                 reason="site_reported_fewer_results_than_it_rendered",
-                records_extra=-shortfall,
+                records_extra=extra,
                 **counters.summary(),
             )
 

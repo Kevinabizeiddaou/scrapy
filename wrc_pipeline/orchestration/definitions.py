@@ -25,7 +25,7 @@ that JSON stream for Dagster metadata, and fails on a non-zero exit code.
 import json
 import subprocess
 import sys
-from typing import Any
+from typing import Any, TextIO
 from uuid import uuid4
 
 from dagster import (
@@ -158,6 +158,7 @@ def _run_and_capture(command: list[str], summary_event: str) -> tuple[int, dict[
     rather than reimplemented here.
     """
     summary: dict[str, Any] = {}
+    echo = _utf8_stdout()
     with subprocess.Popen(  # noqa: S603 - fixed argv, no shell
         command,
         stdout=subprocess.PIPE,
@@ -168,19 +169,49 @@ def _run_and_capture(command: list[str], summary_event: str) -> tuple[int, dict[
         bufsize=1,
     ) as process:
         assert process.stdout is not None
-        for line in process.stdout:
-            print(line.rstrip())  # noqa: T201 - Dagster captures op stdout
-            if event := _summary_event(line, summary_event):
-                summary = event
+        try:
+            for line in process.stdout:
+                echo.write(line)
+                if event := _summary_event(line, summary_event):
+                    summary = event
+        except BaseException:
+            # Dagster signals cancellation with a BaseException; without this the child
+            # crawl would keep running and Popen.__exit__ would block waiting for it.
+            process.kill()
+            raise
+        finally:
+            echo.flush()
     return process.returncode, summary
 
 
+def _utf8_stdout() -> TextIO:
+    """Echo target that cannot fail on scraped text.
+
+    The children emit UTF-8 JSON containing accented party names and the occasional
+    malformed byte from the source pages. A redirected stdout inherits the platform locale
+    (cp1252 on Windows), so writing those lines raises UnicodeEncodeError and would fail an
+    op whose child actually succeeded.
+    """
+    stream = sys.stdout
+    if hasattr(stream, "reconfigure"):
+        stream.reconfigure(encoding="utf-8", errors="replace")
+    return stream
+
+
 def _summary_event(line: str, wanted: str) -> dict[str, Any] | None:
+    """The child's own summary line, or None for any other output.
+
+    Anything can appear on a child's stream -- Scrapy's own logs, a truncated line, a
+    partial write -- so a line that is not JSON, or is JSON of another shape, is simply
+    not a summary.
+    """
     if wanted not in line:
         return None
     try:
         payload = json.loads(line)
     except ValueError:
+        return None
+    if not isinstance(payload, dict):
         return None
     return payload if payload.get("event") == wanted else None
 

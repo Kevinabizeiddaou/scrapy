@@ -29,12 +29,22 @@ carries legal meaning is lost.
 
 from __future__ import annotations
 
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 from bs4 import BeautifulSoup, Comment, NavigableString, Tag
 
 CONTENT_SELECTOR = "div.content"
 TITLE_SELECTOR = "h1.page-title"
+
+# Schemes allowed to survive into a transformed document. The output is a stored artefact
+# a reviewer may open in a browser, so a "javascript:" or "data:" href from upstream markup
+# must not be carried over -- the link is dropped and its text kept.
+_SAFE_SCHEMES = frozenset({"http", "https", "mailto", ""})
+
+# Floor for "the container was found but yielded nothing usable". The shortest real
+# decision in the captured corpus extracts 2,107 characters and the median is 7,566, so
+# this rejects degenerate output with a wide margin and cannot fail a genuinely short one.
+_MIN_TEXT_LENGTH = 200
 
 # Dropped with their subtrees.
 _DISCARD_TAGS = frozenset({"script", "style", "noscript", "iframe", "object", "embed", "form"})
@@ -131,8 +141,12 @@ def extract_decision(html: bytes | str, *, base_url: str, title: str) -> bytes:
         )
 
     _strip(content, base_url=base_url)
-    if not content.get_text(strip=True) and not content.find("img"):
-        raise ContentNotFoundError(f"{CONTENT_SELECTOR!r} container is empty after cleaning")
+    text = content.get_text(" ", strip=True)
+    if len(text) < _MIN_TEXT_LENGTH and not content.find("img"):
+        raise ContentNotFoundError(
+            f"{CONTENT_SELECTOR!r} container yielded only {len(text)} characters of text "
+            f"(minimum {_MIN_TEXT_LENGTH}); refusing to store a truncated decision"
+        )
 
     heading = soup.select_one(TITLE_SELECTOR)
     heading_text = heading.get_text(" ", strip=True) if heading else ""
@@ -165,18 +179,24 @@ def _strip(content: Tag, *, base_url: str) -> None:
 def _clean_attributes(tag: Tag, *, base_url: str) -> None:
     kept = _KEPT_ATTRIBUTES.get(tag.name, ())
     # Sorted so serialisation is byte-identical for identical input.
-    tag.attrs = {
-        name: _resolve(name, value, base_url)
+    resolved = (
+        (name, _resolve(name, value, base_url))
         for name, value in sorted(tag.attrs.items())
         if name in kept
-    }
+    )
+    tag.attrs = {name: value for name, value in resolved if value is not None}
 
 
-def _resolve(name: str, value: object, base_url: str) -> object:
-    """Make ``href``/``src`` absolute so the transformed document stands alone."""
-    if name in ("href", "src") and isinstance(value, str):
-        return urljoin(base_url, value.strip())
-    return value
+def _resolve(name: str, value: object, base_url: str) -> object | None:
+    """Make ``href``/``src`` absolute, dropping any unsafe scheme.
+
+    ``None`` means the attribute is removed.
+    """
+    if name not in ("href", "src") or not isinstance(value, str):
+        return value
+    absolute = urljoin(base_url, value.strip())
+    scheme = urlparse(absolute).scheme.lower()
+    return absolute if scheme in _SAFE_SCHEMES else None
 
 
 def _serialise(content: Tag, *, title: str, heading: str) -> bytes:

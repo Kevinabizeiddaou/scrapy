@@ -19,7 +19,7 @@ from wrc_pipeline.logging import EventLogger
 from wrc_pipeline.storage.mongo import MongoTransformedStore
 from wrc_pipeline.storage.object_store import ObjectStore, sha256_hex, slugify
 from wrc_pipeline.transformation import TRANSFORMATION_VERSION
-from wrc_pipeline.transformation.html_cleaner import ContentNotFoundError, extract_decision
+from wrc_pipeline.transformation.html_cleaner import extract_decision
 from wrc_pipeline.transformation.naming import transformed_filename, transformed_object_key
 
 if TYPE_CHECKING:
@@ -151,7 +151,13 @@ class TransformationRun:
         self.events.event("transformation_document_started", **fields)
         try:
             outcome = self._transform(landing)
-        except (TransformationError, ContentNotFoundError, ClientError, ValueError) as exc:
+        except Exception as exc:
+            # Deliberate boundary: one bad document must not abandon the rest of the run,
+            # and every document must resolve to exactly one outcome. Listing expected
+            # types here instead would let an OSError from MinIO or a PyMongoError escape
+            # and leave the remaining selection unprocessed and the tally unbalanced.
+            # KeyboardInterrupt and SystemExit derive from BaseException, so Ctrl-C still
+            # aborts the run rather than being counted as a document failure.
             self.events.error(
                 "transformation_document_failed",
                 error=str(exc),
@@ -214,6 +220,7 @@ class TransformationRun:
             body=landing["body"],
             identifier=identifier,
             landing_version_hash=version_hash,
+            transformation_version=TRANSFORMATION_VERSION,
             document_type=document_type,
         )
 

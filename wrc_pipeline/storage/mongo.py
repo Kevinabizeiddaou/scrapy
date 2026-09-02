@@ -154,6 +154,37 @@ class MongoTransformedStore:
             [("landing_metadata_id", ASCENDING)], name="by_landing_metadata"
         )
 
+    def resolve_bodies(self, tokens: list[str]) -> list[str]:
+        """Map body names or ids onto the exact body names stored in the landing zone.
+
+        Ingestion accepts a body name in any casing or a numeric body id; a transformation
+        query on exact stored names would silently match nothing for either. Resolving
+        first -- and raising when a token matches no landing record -- turns a filter typo
+        into a clear error instead of a run that selects zero documents and reports success.
+        """
+        stored = {name.casefold(): name for name in self.landing.distinct("body")}
+        by_id = {
+            str(body_id): self.landing.find_one({"body_id": str(body_id)}, {"body": 1})["body"]
+            for body_id in self.landing.distinct("body_id")
+        }
+
+        resolved: list[str] = []
+        unknown: list[str] = []
+        for token in tokens:
+            key = token.strip()
+            match = stored.get(key.casefold()) or by_id.get(key)
+            if match is None:
+                unknown.append(token)
+            elif match not in resolved:
+                resolved.append(match)
+
+        if unknown:
+            raise ValueError(
+                f"no landing records for body filter {unknown}; known bodies: "
+                f"{sorted(stored.values())}"
+            )
+        return resolved
+
     def select_landing_versions(
         self, start: dt.date, end: dt.date, bodies: list[str] | None = None
     ) -> Cursor:
@@ -161,12 +192,21 @@ class MongoTransformedStore:
 
         ``published_date`` is the decision's own publication date, stored by ingestion as a
         UTC-midnight BSON datetime -- the one normalised, queryable date in the schema.
+
+        The window is half-open on the upper bound (``< end + 1 day``) rather than
+        ``<= end``. Both select exactly the same records while every stored value is
+        midnight, but the half-open form keeps inclusive *calendar-date* semantics if a
+        publication datetime ever carries a time of day: ``<= end`` would silently drop a
+        decision published at 14:30 on the end date.
         """
         query: dict[str, Any] = {
-            "published_date": {"$gte": _utc_midnight(start), "$lte": _utc_midnight(end)}
+            "published_date": {
+                "$gte": _utc_midnight(start),
+                "$lt": _utc_midnight(end + dt.timedelta(days=1)),
+            }
         }
         if bodies:
-            query["body"] = {"$in": bodies}
+            query["body"] = {"$in": self.resolve_bodies(bodies)}
         return self.landing.find(query).sort([("published_date", ASCENDING), ("_id", ASCENDING)])
 
     def count_undated_landing_records(self) -> int:

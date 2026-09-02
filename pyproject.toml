@@ -9,7 +9,6 @@ dependencies = [
     "pydantic-settings>=2.6",
     "pymongo>=4.10",
     "boto3>=1.35",
-    "python-dateutil>=2.9",
     "beautifulsoup4>=4.12",
     "lxml>=5.3",
     "dagster>=1.9",
@@ -38,6 +37,9 @@ include = ["wrc_pipeline*"]
 [tool.ruff]
 line-length = 100
 target-version = "py312"
+# Ruff's defaults only skip ".venv"; a differently named virtual environment would
+# otherwise put third-party scripts through the project's quality gate.
+extend-exclude = [".venv*", "venv*", ".env*", "env"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "C4", "RET", "PTH", "TID", "ARG"]

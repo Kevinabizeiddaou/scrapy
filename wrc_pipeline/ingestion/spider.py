@@ -213,6 +213,37 @@ class WrcDecisionsSpider(scrapy.Spider):
         )
 
     def parse_search(self, response: Response) -> Iterator[Any]:
+        """Guarded entry point: an unreadable search page must fail its partition.
+
+        Scrapy delivers a callback exception to ``spider_error``, not to the request's
+        errback, and keeps the engine running. Without this guard a page-1 response the
+        parser cannot read -- a non-text Content-Type from a WAF, say -- would leave the
+        partition's result count unestablished and it would close as an empty, balanced,
+        successful partition while holding real decisions.
+        """
+        ctx: Context = response.meta["wrc"]
+        try:
+            yield from self._parse_search(response)
+        except Exception as exc:
+            self.events.error(
+                "partition_failed",
+                reason="search_page_unreadable",
+                url=response.url,
+                page=ctx.page,
+                http_status=response.status,
+                error=str(exc),
+                error_type=type(exc).__name__,
+                **ctx.log_fields(),
+            )
+            if ctx.page == 1:
+                self.accounting.fail_partition(
+                    ctx.key, f"search_page_unreadable:{type(exc).__name__}"
+                )
+            else:
+                self.accounting.partitions[ctx.key].pages_parsed += 1
+                self.accounting.complete_partition_if_done(ctx.key)
+
+    def _parse_search(self, response: Response) -> Iterator[Any]:
         ctx: Context = response.meta["wrc"]
         key = ctx.key
         rows = parse_result_rows(response.text, response.url)
